@@ -70,7 +70,6 @@ class CloudwatchLogger:
             while True:
                 for line in stream:
                     self.logger.info(line.decode('utf-8'))
-                    print(line.decode('utf-8'))
         except KeyboardInterrupt:
             print('Keyboard Interrupt, exiting.')
 
@@ -130,7 +129,6 @@ def do_work(args: argparse.Namespace):
         access_key=args.aws_secret_access_key,
         region=args.aws_region,
     )
-    print(args.bash_command)
     container = create_container(
         image_name=args.docker_image,
         bash_command=args.bash_command,
