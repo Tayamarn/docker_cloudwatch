@@ -1,11 +1,11 @@
 import argparse
+import boto3
 import logging
+import time
 import typing as tp
 
 import botocore
 import docker
-
-import patched_cloudwatch
 
 
 class DockerCloudwatchProblem(Exception):
@@ -13,6 +13,9 @@ class DockerCloudwatchProblem(Exception):
 
 
 class CloudwatchLogger:
+    #SET THE max message size (- 26 for overhead)
+    MAX_MESSAGE_BYTES = 256 * 1024 - 26
+
     def __init__(
             self,
             log_group: str,
@@ -37,41 +40,126 @@ class CloudwatchLogger:
             access_key: str,
             region: str,
     ) -> tp.Optional[logging.Logger]:
-        logger = logging.getLogger('docker_cloudwatch')
-        formatter = logging.Formatter('%(asctime)s : %(levelname)s - %(message)s')
-        try:
-            cloudwatch_handler = patched_cloudwatch.CloudwatchHandler(
-                log_group=log_group,
-                log_stream=log_stream,
-                access_id=access_id,
-                access_key=access_key,
-                region=region,
-                overflow='split',
-            )
-        except botocore.exceptions.ClientError:
-            raise DockerCloudwatchProblem(
-                'Exception happened on cloudwatch setup, check your credentials.'
-            )
-        cloudwatch_handler.setFormatter(formatter)
-        logger.setLevel(logging.INFO)
-        logger.addHandler(cloudwatch_handler)
-        self.logger = logger
+        self.log_group = log_group
+        self.log_stream = log_stream
+        self.access_id = access_id
+        self.access_key = access_key
+        self.region = region
+        self.next_sequence_token = None
 
+        self.session = boto3.Session(
+            aws_access_key_id=access_id,
+            aws_secret_access_key=access_key,
+            region_name=region
+        )
+        self.logs_client = self.session.client('logs')
+        try:
+            response = self.logs_client.describe_log_streams(
+                logGroupName=self.log_group,
+            )
+            for l in response['logStreams']:
+                if l['logStreamName'] == self.log_stream:
+                    self.next_sequence_token = l['uploadSequenceToken'] if 'uploadSequenceToken' in l else None
+            if self.next_sequence_token is None:
+                self.logs_client.create_log_stream(
+                    logGroupName=self.log_group,
+                    logStreamName=self.log_stream,
+                )
+        except botocore.exceptions.ClientError as error:
+            if error.response['Error']['Code'] == 'ResourceAlreadyExistsException':
+                pass
+            elif error.response['Error']['Code'] == 'ResourceNotFoundException':
+                self.logs_client.create_log_group(
+                    logGroupName=self.log_group,
+                )
+                self.logs_client.create_log_stream(
+                    logGroupName=self.log_group,
+                    logStreamName=self.log_stream,
+                )
+            else:
+                raise
+
+    def actually_send_log_batch(self, entries: dict):
+        print(entries)
+        if self.next_sequence_token:
+            response = self.logs_client.put_log_events(
+                logGroupName=self.log_group,
+                logStreamName=self.log_stream,
+                sequenceToken = self.next_sequence_token,
+                logEvents=entries,
+            )
+        else:
+            response = self.logs_client.put_log_events(
+                logGroupName=self.log_group,
+                logStreamName=self.log_stream,
+                logEvents=entries,
+            )
+        self.next_sequence_token = response['nextSequenceToken']
+
+    def send_log_batch(self, entries: dict):
+        try:
+          self.actually_send_log_batch(entries)
+        except botocore.exceptions.ClientError as error:
+            # Not the best way to get tokens, but I got this from another project.
+            if error.response['Error']['Code'] == 'DataAlreadyAcceptedException':
+                # Ignore DataAlreadyAcceptedException and get next token
+                exception_text = str(e)
+                self.next_sequence_token = exception_text[exception_text.find("sequenceToken: ")+15:]
+            elif error.response['Error']['Code'] == 'InvalidSequenceTokenException':
+                # Change the token and retry
+                exception_text = str(e)
+                self.next_sequence_token = exception_text[exception_text.find("sequenceToken is: ")+18:]
+                self.send_log(timestamp, log_entry)
+            else:
+                # Wait and try to resend
+                time.sleep(1)
+                self.actually_send_log_batch(entries)
+
+    def generate_entry(self, timestamp: int, message: str):
+        return {
+            'timestamp': timestamp,
+            'message': message
+        }
 
     def stream_infinitely(
             self,
             stream: docker.types.daemon.CancellableStream,
     ):
-        # cloudwatch lib uses boto3, which is synchronous.
-        # If issues with speed arise - consider using aioboto3.
-        # Major consideration: boto3 is supported by amazon, and aioboto3 is third-party,
-        # so I decided in favor of a lightweight boto3 handler.
+        entries = []
+        entries_size = 0
         try:
             while True:
+                timestamp = round(time.time() * 1000)
+                entries = []
+                entries_size = 0
                 for line in stream:
-                    self.logger.info(line.decode('utf-8'))
+                    # 45 for overhead
+                    entry_size = len(line) + 45
+                    if entries_size + entry_size > self.MAX_MESSAGE_BYTES:
+                        self.send_log_batch(entries)
+                        entries = []
+                        entries_size = 0
+
+                    if entry_size > self.MAX_MESSAGE_BYTES:
+                        index = 0
+                        encoded_entry = log_entry.encode('utf-8')
+                        log_part = encoded_entry[:MAX_MESSAGE_BYTES].decode('utf-8', 'ignore')
+                        while log_part:
+                            self.send_log_batch(self.generate_entry(timestamp, log_part))
+                            index += len(log_part.encode('utf-8'))
+                            log_part = encoded_entry[index:index+MAX_MESSAGE_BYTES].decode('utf-8', 'ignore')
+                    else:
+                        entry = self.generate_entry(timestamp, line.decode('utf-8'))
+                        entries.append(entry)
+                        entries_size += entry_size
+                if entries:
+                    self.send_log_batch(entries)
+
         except KeyboardInterrupt:
             print('Keyboard Interrupt, exiting.')
+        finally:
+            if entries:
+                self.send_log_batch(entries)
 
 
 def parse_args() -> argparse.Namespace:
