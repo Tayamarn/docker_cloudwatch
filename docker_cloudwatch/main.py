@@ -75,14 +75,47 @@ class CloudwatchLogger:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--docker-image', required=True)
-    parser.add_argument('--bash-command', required=True)
-    parser.add_argument('--aws-cloudwatch-group', required=True)
-    parser.add_argument('--aws-cloudwatch-stream', required=True)
-    parser.add_argument('--aws-access-key-id', required=True)
-    parser.add_argument('--aws-secret-access-key', required=True)
-    parser.add_argument('--aws-region', required=True)
+    parser = argparse.ArgumentParser(
+        description=(
+            'Run a Docker container using the given image name and bash command. '
+            'Send output logs to Cloudwatch, using the provided credentials.'
+        ),
+    )
+    parser.add_argument(
+        '--docker-image',
+        required=True,
+        help='Name of a Docker image.',
+    )
+    parser.add_argument(
+        '--bash-command',
+        required=True,
+        help='Bash command to run inside the Docker container.',
+    )
+    parser.add_argument(
+        '--aws-cloudwatch-group',
+        required=True,
+        help='Name of an AWS CloudWatch group.',
+    )
+    parser.add_argument(
+        '--aws-cloudwatch-stream',
+        required=True,
+        help='Name of an AWS CloudWatch stream.',
+    )
+    parser.add_argument(
+        '--aws-access-key-id',
+        required=True,
+        help='AWS access key.',
+    )
+    parser.add_argument(
+        '--aws-secret-access-key',
+        required=True,
+        help='AWS secret access key.',
+    )
+    parser.add_argument(
+        '--aws-region',
+        required=True,
+        help='AWS region name.',
+    )
     return parser.parse_args()
 
 
