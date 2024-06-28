@@ -105,7 +105,7 @@ class CloudwatchLogger:
                 # Change the token and retry
                 exception_text = str(e)
                 self.next_sequence_token = exception_text[exception_text.find("sequenceToken is: ")+18:]
-                self.send_log(timestamp, log_entry)
+                self.actually_send_log_batch(entries)
             else:
                 # Wait and try to resend
                 time.sleep(1)
@@ -131,18 +131,18 @@ class CloudwatchLogger:
                     # 45 for overhead
                     entry_size = len(line) + 45
                     if entries_size + entry_size > self.MAX_MESSAGE_BYTES:
-                        self.send_log_batch(entries)
-                        entries = []
-                        entries_size = 0
+                        if entries:
+                            self.send_log_batch(entries)
+                            entries = []
+                            entries_size = 0
 
                     if entry_size > self.MAX_MESSAGE_BYTES:
                         index = 0
-                        encoded_entry = log_entry.encode('utf-8')
-                        log_part = encoded_entry[:MAX_MESSAGE_BYTES].decode('utf-8', 'ignore')
+                        log_part = line[:self.MAX_MESSAGE_BYTES].decode('utf-8', 'ignore')
                         while log_part:
                             self.send_log_batch(self.generate_entry(timestamp, log_part))
                             index += len(log_part.encode('utf-8'))
-                            log_part = encoded_entry[index:index+MAX_MESSAGE_BYTES].decode('utf-8', 'ignore')
+                            log_part = line[index:index+self.MAX_MESSAGE_BYTES].decode('utf-8', 'ignore')
                     else:
                         entry = self.generate_entry(timestamp, line.decode('utf-8'))
                         entries.append(entry)

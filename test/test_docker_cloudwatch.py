@@ -4,11 +4,12 @@ import logging
 from unittest.mock import MagicMock
 from unittest.mock import patch
 
+import boto3
 import docker
 import pytest
 
 import main
-import patched_cloudwatch
+import cloudwatch_logger
 
 
 @pytest.fixture
@@ -18,58 +19,53 @@ def time_fixture():
         yield mock_time
 
 
-@pytest.mark.parametrize("container_logs,expected_caplog,expected_aws", [
+@pytest.mark.parametrize("container_logs,expected_aws,max_message_bytes", [
     # Happy path
     (
-        [b'1', b'2', b'3'],
+        b'1\n2\n3',
         [
-            ('docker_cloudwatch', logging.INFO, '1'),
-            ('docker_cloudwatch', logging.INFO, '2'),
-            ('docker_cloudwatch', logging.INFO, '3'),
+            {'logGroupName': 'test_aws_cloudwatch_group', 'logStreamName': 'test_aws_cloudwatch_stream', 'logEvents': [{'timestamp': 1719484518000, 'message': '1'}, {'timestamp': 1719484518000, 'message': '2'}, {'timestamp': 1719484518000, 'message': '3'}]}
         ],
-        [
-            {'logGroupName': 'test_aws_cloudwatch_group', 'logStreamName': 'test_aws_cloudwatch_stream', 'logEvents': [{'timestamp': 1719484518000, 'message': '2024-06-27 13:35:18,000 : INFO - 1'}]},
-            {'logGroupName': 'test_aws_cloudwatch_group', 'logStreamName': 'test_aws_cloudwatch_stream', 'sequenceToken': 1, 'logEvents': [{'timestamp': 1719484518000, 'message': '2024-06-27 13:35:18,000 : INFO - 2'}]},
-            {'logGroupName': 'test_aws_cloudwatch_group', 'logStreamName': 'test_aws_cloudwatch_stream', 'sequenceToken': 1, 'logEvents': [{'timestamp': 1719484518000, 'message': '2024-06-27 13:35:18,000 : INFO - 3'}]}
-        ],
+        1000,
     ),
     # Long message
     (
-        [b'10000000000000000000000000000000000000000'],
+        b'10000000000000000000000000000000000000000',
         [
-            ('docker_cloudwatch', logging.INFO, '10000000000000000000000000000000000000000'),
+            {'logGroupName': 'test_aws_cloudwatch_group', 'logStreamName': 'test_aws_cloudwatch_stream', 'logEvents': {'timestamp': 1719484518000, 'message': '1000000000000000000000000000000000000000'}},
+            {'logGroupName': 'test_aws_cloudwatch_group', 'logStreamName': 'test_aws_cloudwatch_stream', 'sequenceToken': 1, 'logEvents': {'timestamp': 1719484518000, 'message': '0'}}
         ],
-        [
-            {'logGroupName': 'test_aws_cloudwatch_group', 'logStreamName': 'test_aws_cloudwatch_stream', 'logEvents': [{'timestamp': 1719484518000, 'message': '2024-06-27 13:35:18,000 : INFO - 1000000'}]},
-            {'logGroupName': 'test_aws_cloudwatch_group', 'logStreamName': 'test_aws_cloudwatch_stream', 'sequenceToken': 1, 'logEvents': [{'timestamp': 1719484518000, 'message': '0000000000000000000000000000000000'}]},
-        ],
+        40,
     ),
     # Unicode
     (
-        ['Альфа бета гамма дельта'.encode('utf-8')],
+        'Альфа бета гамма дельта'.encode('utf-8'),
         [
-            ('docker_cloudwatch', logging.INFO, 'Альфа бета гамма дельта'),
+            {'logGroupName': 'test_aws_cloudwatch_group', 'logStreamName': 'test_aws_cloudwatch_stream', 'logEvents': {'timestamp': 1719484518000, 'message': 'Альфа бета гамма дель'}},
+            {'logGroupName': 'test_aws_cloudwatch_group', 'logStreamName': 'test_aws_cloudwatch_stream', 'sequenceToken': 1, 'logEvents': {'timestamp': 1719484518000, 'message': 'та'}}
         ],
-        [
-            {'logGroupName': 'test_aws_cloudwatch_group', 'logStreamName': 'test_aws_cloudwatch_stream', 'logEvents': [{'timestamp': 1719484518000, 'message': '2024-06-27 13:35:18,000 : INFO - Аль'}]},
-            {'logGroupName': 'test_aws_cloudwatch_group', 'logStreamName': 'test_aws_cloudwatch_stream', 'sequenceToken': 1, 'logEvents': [{'timestamp': 1719484518000, 'message': 'фа бета гамма дельта'}]},
-        ],
+        40,
     ),
 ])
 def test_docker_cloudwatch(
-        caplog,
         monkeypatch,
         time_fixture,
         container_logs,
-        expected_caplog,
         expected_aws,
+        max_message_bytes,
 ):
     logs = []
     token = 0
+    logs_taken = False
 
     class MockContainer:
-        def logs(self, stream):
-            return container_logs
+        def logs(self, since, until):
+            nonlocal logs_taken
+            if logs_taken:
+                raise KeyboardInterrupt
+            else:
+                logs_taken = True
+                return container_logs
 
     class MockDockerClient:
         @property
@@ -92,25 +88,16 @@ def test_docker_cloudwatch(
                 put_log_events=MagicMock(side_effect=mock_log_event),
             )
 
-    def mock_stream(self, stream):
-        for line in stream:
-            self.logger.info(line.decode('utf-8'))
-
     monkeypatch.setattr(docker, 'from_env', lambda: MockDockerClient())
     monkeypatch.setattr(
-        patched_cloudwatch.CloudwatchHandler.boto3,
+        boto3,
         'Session',
         lambda **kwargs: MockSession(),
     )
     monkeypatch.setattr(
-        patched_cloudwatch,
+        cloudwatch_logger.CloudwatchLogger,
         'MAX_MESSAGE_BYTES',
-        40,
-    )
-    monkeypatch.setattr(
-        main.CloudwatchLogger,
-        'stream_infinitely',
-        mock_stream,
+        max_message_bytes,
     )
     args = argparse.Namespace(
         docker_image='test_docker_image',
@@ -120,7 +107,8 @@ def test_docker_cloudwatch(
         aws_access_key_id='test_aws_access_key_id',
         aws_secret_access_key='test_aws_secret_access_key',
         aws_region='test_aws_region',
+        debug=False,
     )
     main.do_work(args)
-    assert caplog.record_tuples == expected_caplog
+    print(logs)
     assert logs == expected_aws
