@@ -258,7 +258,7 @@ def do_work(args: argparse.Namespace):
         image_name=args.docker_image,
         bash_command=args.bash_command,
     )
-    logger.stream_infinitely(container)
+    cloudwatch_logger.stream_infinitely(container)
 
 
 def main():
