@@ -23,7 +23,9 @@ class CloudwatchLogger:
             access_id: str,
             access_key: str,
             region: str,
+            debug: bool,
     ):
+        self.debug = debug
         self._setup_logger(
             log_group=log_group,
             log_stream=log_stream,
@@ -80,7 +82,8 @@ class CloudwatchLogger:
                 raise
 
     def actually_send_log_batch(self, entries: dict):
-        print(entries)
+        if self.debug:
+            print(entries)
         if self.next_sequence_token:
             response = self.logs_client.put_log_events(
                 logGroupName=self.log_group,
@@ -204,6 +207,11 @@ def parse_args() -> argparse.Namespace:
         required=True,
         help='AWS region name.',
     )
+    parser.add_argument(
+        '--debug',
+        action='store_true',
+        help='Print debug info.',
+    )
     return parser.parse_args()
 
 
@@ -249,6 +257,7 @@ def do_work(args: argparse.Namespace):
         access_id=args.aws_access_key_id,
         access_key=args.aws_secret_access_key,
         region=args.aws_region,
+        debug=args.debug,
     )
     container = create_container(
         image_name=args.docker_image,
