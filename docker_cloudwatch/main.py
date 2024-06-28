@@ -118,24 +118,25 @@ class CloudwatchLogger:
                 time.sleep(1)
                 self.actually_send_log_batch(entries)
 
-    def generate_entry(self, timestamp: int, message: str):
+    def generate_entry(self, timestamp: float, message: str):
         return {
-            'timestamp': timestamp,
+            'timestamp': round(timestamp * 1000),
             'message': message
         }
 
     def stream_infinitely(
             self,
-            stream: docker.types.daemon.CancellableStream,
+            container
     ):
         entries = []
         entries_size = 0
+        since = None
         try:
             while True:
-                timestamp = round(time.time() * 1000)
+                timestamp = time.time()
                 entries = []
                 entries_size = 0
-                for line in stream:
+                for line in container.logs(since=since, until=timestamp).splitlines():
                     # 45 for overhead
                     entry_size = len(line) + 45
                     if entries_size + entry_size > self.MAX_MESSAGE_BYTES:
@@ -157,6 +158,8 @@ class CloudwatchLogger:
                         entries_size += entry_size
                 if entries:
                     self.send_log_batch(entries)
+                since = timestamp
+                time.sleep(1)
 
         except KeyboardInterrupt:
             print('Keyboard Interrupt, exiting.')
@@ -242,14 +245,6 @@ def create_container(
     )
 
 
-def send_container_logs_to_logger(
-        container: docker.models.containers.Container,
-        logger: CloudwatchLogger,
-):
-    logs = container.logs(stream=True)
-    logger.stream_infinitely(logs)
-
-
 def do_work(args: argparse.Namespace):
     cloudwatch_logger = CloudwatchLogger(
         log_group=args.aws_cloudwatch_group,
@@ -263,7 +258,7 @@ def do_work(args: argparse.Namespace):
         image_name=args.docker_image,
         bash_command=args.bash_command,
     )
-    send_container_logs_to_logger(container, cloudwatch_logger)
+    logger.stream_infinitely(container)
 
 
 def main():
