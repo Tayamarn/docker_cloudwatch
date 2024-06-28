@@ -83,7 +83,8 @@ def create_container(
     return client.containers.run(
         image,
         command=['bash', '-c', bash_command],
-        detach=True
+        detach=True,
+        tty=True,
     )
 
 
